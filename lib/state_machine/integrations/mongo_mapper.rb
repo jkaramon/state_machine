@@ -188,122 +188,151 @@ module StateMachine
       
       # The default options to use for state machines using this integration
       @defaults = {:action => :save}
-      
+
       # Should this integration be used for state machines in the given class?
       # Classes that include MongoMapper::Document will automatically use the
       # MongoMapper integration.
       def self.matches?(klass)
         defined?(::MongoMapper::Document) && klass <= ::MongoMapper::Document
       end
-      
-      # Adds a validation error to the given object (no i18n support)
-      def invalidate(object, attribute, message, values = [])
-        object.errors.add(self.attribute(attribute), generate_message(message, values))
+
+      def self.extended(base) #:nodoc:
+        if defined?(I18n)
+          locale = "#{File.dirname(__FILE__)}/active_model/locale.rb"
+          I18n.load_path.unshift(locale) unless I18n.load_path.include?(locale)
+        end
       end
-      
+
+      # Adds a validation error to the given object 
+      def invalidate(object, attribute, message, values = [])
+        if defined?(I18n)
+          super
+        else
+          object.errors.add(self.attribute(attribute), generate_message(message, values))
+        end
+      end
+
       protected
-        # Does not support observers
-        def supports_observers?
-          false
+      # Does not support observers
+      def supports_observers?
+        false
+      end
+
+      # Always adds validation support
+      def supports_validations?
+        true
+      end
+
+      # Only runs validations on the action if using <tt>:save</tt>
+      def runs_validations_on_action?
+        action == :save
+      end
+
+      # Always adds dirty tracking support
+      def supports_dirty_tracking?(object)
+        true
+      end
+
+      # Always uses the <tt>:activemodel</tt> translation scope
+      def i18n_scope
+        :activemodel
+      end
+
+      # The default options to use when generating messages for validation
+      # errors
+      def default_error_message_options(object, attribute, message)
+        super
+      end
+
+      # Only allows translation of I18n is available
+      def translate(klass, key, value)
+        if defined?(I18n)
+          super
+        else
+          value ? value.to_s.humanize.downcase : 'nil'
         end
-        
-        # Always adds validation support
-        def supports_validations?
-          true
-        end
-        
-        # Only runs validations on the action if using <tt>:save</tt>
-        def runs_validations_on_action?
-          action == :save
-        end
-        
-        # Always adds dirty tracking support
-        def supports_dirty_tracking?(object)
-          true
-        end
-        
-        # Don't allow callback terminators
-        def callback_terminator
-        end
-        
-        # Don't allow translations
-        def translate(klass, key, value)
-          value.to_s.humanize.downcase
-        end
-        
-        # Defines an initialization hook into the owner class for setting the
-        # initial state of the machine *before* any attributes are set on the
-        # object
-        def define_state_initializer
-          @instance_helper_module.class_eval <<-end_eval, __FILE__, __LINE__
-            def initialize(attrs = {}, *args)
-              from_database = args.first
-              
-              if !from_database && (!attrs || !attrs.stringify_keys.key?('_id'))
-                filtered = respond_to?(:filter_protected_attrs) ? filter_protected_attrs(attrs) : attrs 
-                ignore = filtered ? filtered.keys : []
-                
-                initialize_state_machines(:dynamic => false, :ignore => ignore)
-                super
-                initialize_state_machines(:dynamic => true, :ignore => ignore)
-              else
-                super
-              end
-            end
-          end_eval
-        end
-        
-        # Skips defining reader/writer methods since this is done automatically
-        def define_state_accessor
-          owner_class.key(attribute, String) unless owner_class.keys.include?(attribute)
-          
-          name = self.name
-          owner_class.validates_each(attribute, :logic => lambda {|*|
-            machine = self.class.state_machine(name)
-            machine.invalidate(self, :state, :invalid) unless machine.states.match(self)
-          })
-        end
-        
-        # Adds support for defining the attribute predicate, while providing
-        # compatibility with the default predicate which determines whether
-        # *anything* is set for the attribute's value
-        def define_state_predicate
-          name = self.name
-          
-          # Still use class_eval here instance of define_instance_method since
-          # we need to be able to call +super+
-          @instance_helper_module.class_eval do
-            define_method("#{name}?") do |*args|
-              args.empty? ? super(*args) : self.class.state_machine(name).states.matches?(self, *args)
-            end
-          end
-        end
-        
-        # Adds hooks into validation for automatically firing events
-        def define_action_helpers
-          super(action == :save ? :create_or_update : action)
-        end
-        
-        # Creates a scope for finding records *with* a particular state or
-        # states for the attribute
-        def create_with_scope(name)
-          define_scope(name, lambda {|values| {:conditions => {attribute => {'$in' => values}}}})
-        end
-        
-        # Creates a scope for finding records *without* a particular state or
-        # states for the attribute
-        def create_without_scope(name)
-          define_scope(name, lambda {|values| {:conditions => {attribute => {'$nin' => values}}}})
-        end
-        
-        # Defines a new scope with the given name
-        def define_scope(name, scope)
-          if defined?(::MongoMapper::Version) && ::MongoMapper::Version >= '0.8.0'
-            lambda {|model, values| model.query.merge(model.query(scope.call(values)))}
+      end
+
+
+      # Don't allow callback terminators
+      def callback_terminator
+      end
+
+
+      # Defines an initialization hook into the owner class for setting the
+      # initial state of the machine *before* any attributes are set on the
+      # object
+      def define_state_initializer
+        @instance_helper_module.class_eval <<-end_eval, __FILE__, __LINE__
+        def initialize(attrs = {}, *args)
+          from_database = args.first
+
+          if !from_database && (!attrs || !attrs.stringify_keys.key?('_id'))
+            filtered = respond_to?(:filter_protected_attrs) ? filter_protected_attrs(attrs) : attrs 
+            ignore = filtered ? filtered.keys : []
+
+            initialize_state_machines(:dynamic => false, :ignore => ignore)
+            super
+            initialize_state_machines(:dynamic => true, :ignore => ignore)
           else
-            lambda {|model, values| model.all(scope.call(values))}
+            super
           end
         end
+        end_eval
+      end
+
+      # Skips defining reader/writer methods since this is done automatically
+      def define_state_accessor
+        owner_class.key(attribute, String) unless owner_class.keys.include?(attribute)
+
+        name = self.name
+        owner_class.validates_each(attribute) do |record, attr, value|
+          machine = self.class.state_machine(name)
+          machine.invalidate(record, :state, :invalid) unless machine.states.match(record)
+        end
+      end
+
+      # Adds support for defining the attribute predicate, while providing
+      # compatibility with the default predicate which determines whether
+      # *anything* is set for the attribute's value
+      def define_state_predicate
+        name = self.name
+
+        # Still use class_eval here instance of define_instance_method since
+        # we need to be able to call +super+
+        @instance_helper_module.class_eval do
+          define_method("#{name}?") do |*args|
+            args.empty? ? super(*args) : self.class.state_machine(name).states.matches?(self, *args)
+          end
+        end
+      end
+
+      # Adds hooks into validation for automatically firing events
+      def define_action_helpers
+        super(action == :save ? :create_or_update : action)
+      end
+
+
+      # Creates a scope for finding records *with* a particular state or
+      # states for the attribute
+      def create_with_scope(name)
+        define_scope(name, lambda {|values| {:conditions => {attribute => {'$in' => values}}}})
+      end
+
+      # Creates a scope for finding records *without* a particular state or
+      # states for the attribute
+      def create_without_scope(name)
+        define_scope(name, lambda {|values| {:conditions => {attribute => {'$nin' => values}}}})
+      end
+
+      # Defines a new scope with the given name
+      def define_scope(name, scope)
+        if defined?(::MongoMapper::Version) && ::MongoMapper::Version >= '0.8.0'
+          lambda {|model, values| model.query.merge(model.query(scope.call(values)))}
+        else
+          lambda {|model, values| model.all(scope.call(values))}
+        end
+      end
     end
   end
 end
